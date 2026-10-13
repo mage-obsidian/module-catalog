@@ -102,6 +102,36 @@ describe("ProductForm", () => {
         expect(wrapper.find("button[type=submit]").text()).toBe("Select options");
     });
 
+    it("picks up the options a listing card carried in the address", async () => {
+        window.location.hash = "#color=5&size=7";
+        const wrapper = build();
+        await flushPromises();
+        window.location.hash = "";
+
+        expect(wrapper.find('[data-option-id="5"]').attributes("aria-checked")).toBe("true");
+        expect(wrapper.find('[data-option-id="7"]').attributes("aria-checked")).toBe("true");
+        expect(wrapper.find("button[type=submit]").text()).toBe("Add to cart");
+    });
+
+    it("ignores an address option the product does not offer", async () => {
+        window.location.hash = "#color=99&size=7&weight=1";
+        const wrapper = build();
+        await flushPromises();
+        window.location.hash = "";
+
+        expect(wrapper.find('[data-option-id="7"]').attributes("aria-checked")).toBe("true");
+        expect(wrapper.findAll('[aria-checked="true"]')).toHaveLength(1);
+    });
+
+    it("leaves the choice empty when the address names no option", async () => {
+        window.location.hash = "#reviews";
+        const wrapper = build();
+        await flushPromises();
+        window.location.hash = "";
+
+        expect(wrapper.findAll('[aria-checked="true"]')).toHaveLength(0);
+    });
+
     it("greys impossible combinations once one attribute is chosen", async () => {
         const wrapper = build();
         await wrapper.find('[data-option-id="5"]').trigger("click"); // Red
@@ -181,5 +211,170 @@ describe("variant announcements", () => {
 
         expect(events.recorded("product_variant_change")).toEqual([{ productId: 11 }]);
         wrapper.unmount();
+    });
+});
+
+describe("ProductForm — prices with and without tax", () => {
+    function taxedConfig() {
+        const parsed = JSON.parse(config());
+        parsed.attributes[93].options[0].products = ["11", "13"];
+        parsed.attributes[144].options[1].products = ["12", "13"];
+        parsed.index[13] = { 93: "5", 144: "8" };
+        parsed.optionPrices = {
+            11: { finalPrice: { amount: 21.6 }, basePrice: { amount: 20 }, oldPrice: { amount: 21.6 } },
+            12: { finalPrice: { amount: 32.4 }, basePrice: { amount: 30 }, oldPrice: { amount: 32.4 } },
+            13: { finalPrice: { amount: 43.2 }, basePrice: { amount: 40 }, oldPrice: { amount: 43.2 } },
+        };
+        return JSON.stringify(parsed);
+    }
+
+    function taxed(priceDisplay) {
+        return mount(ProductForm, {
+            props: {
+                config: taxedConfig(),
+                swatches: swatches(),
+                productId: 7,
+                action: "/checkout/cart/add",
+                uenc: "ENC",
+                initialPrice: "$21.60",
+                initialPriceExcl: "$20.00",
+                priceDisplay,
+                labels: { ...LABELS, inclTax: "Incl. Tax", exclTax: "Excl. Tax" },
+            },
+        });
+    }
+
+    const basis = (wrapper) =>
+        wrapper.findAll("[data-price-basis]").map((node) => [node.attributes("data-price-basis"), node.find(".price").text()]);
+
+    it("states both amounts before any variant is chosen", () => {
+        expect(basis(taxed("both"))).toEqual([
+            ["incl", "$21.60"],
+            ["excl", "$20.00"],
+        ]);
+    });
+
+    it("keeps stating both amounts of the variant the buyer chooses", async () => {
+        const wrapper = taxed("both");
+        await wrapper.find('[data-option-id="5"]').trigger("click");
+        await wrapper.find('[data-option-id="7"]').trigger("click");
+
+        expect(basis(wrapper)).toEqual([
+            ["incl", "$21.60"],
+            ["excl", "$20.00"],
+        ]);
+
+        await wrapper.find('[data-option-id="8"]').trigger("click");
+
+        expect(basis(wrapper)).toEqual([
+            ["incl", "$43.20"],
+            ["excl", "$40.00"],
+        ]);
+    });
+
+    it("labels each amount", () => {
+        const text = taxed("both").text();
+
+        expect(text).toContain("Incl. Tax");
+        expect(text).toContain("Excl. Tax");
+    });
+
+    it("states a single amount when the store shows the price with tax only", async () => {
+        const wrapper = taxed("incl");
+        await wrapper.find('[data-option-id="5"]').trigger("click");
+        await wrapper.find('[data-option-id="7"]').trigger("click");
+
+        expect(wrapper.findAll("[data-price-basis]")).toHaveLength(0);
+        expect(wrapper.find(".pdp__price-final").text()).toBe("$21.60");
+    });
+
+    it("states a single amount when the store shows the price without tax", async () => {
+        const wrapper = taxed("excl");
+
+        expect(wrapper.findAll("[data-price-basis]")).toHaveLength(0);
+        expect(wrapper.find(".pdp__price-final").text()).toBe("$21.60");
+    });
+});
+
+
+describe("ProductForm — quantity discounts", () => {
+    const TIER_LABEL = "Buy %1 for %2 each and save %3%";
+
+    function tiered() {
+        const parsed = JSON.parse(config());
+        parsed.optionPrices[11].tierPrices = [
+            { qty: 5, price: 16, percentage: 20 },
+            { qty: 10, price: 14, percentage: 30 },
+        ];
+        return mount(ProductForm, {
+            props: {
+                config: JSON.stringify(parsed),
+                swatches: swatches(),
+                productId: 7,
+                action: "/checkout/cart/add",
+                uenc: "ENC",
+                initialPrice: "$20.00",
+                labels: { ...LABELS, tierPrice: TIER_LABEL },
+            },
+        });
+    }
+
+    const lines = (wrapper) => wrapper.findAll(".prices-tier li").map((node) => node.text());
+
+    it("announces nothing before a variant is chosen", () => {
+        expect(lines(tiered())).toEqual([]);
+    });
+
+    it("announces each tier of the chosen variant with its unit price and saving", async () => {
+        const wrapper = tiered();
+        await wrapper.find('[data-option-id="5"]').trigger("click");
+        await wrapper.find('[data-option-id="7"]').trigger("click");
+
+        expect(lines(wrapper)).toEqual([
+            "Buy 5 for $16.00 each and save 20%",
+            "Buy 10 for $14.00 each and save 30%",
+        ]);
+    });
+
+    it("drops the announcement when the chosen variant has no tiers", async () => {
+        const wrapper = tiered();
+        await wrapper.find('[data-option-id="6"]').trigger("click");
+        await wrapper.find('[data-option-id="8"]').trigger("click");
+
+        expect(lines(wrapper)).toEqual([]);
+    });
+});
+
+describe("ProductForm — quantity increments", () => {
+    function sold(qtyMin, qtyStep, initialQty) {
+        return mount(ProductForm, {
+            props: {
+                config: config(),
+                swatches: swatches(),
+                productId: 7,
+                action: "/checkout/cart/add",
+                uenc: "ENC",
+                initialPrice: "$20.00",
+                qtyMin,
+                qtyStep,
+                initialQty,
+                labels: LABELS,
+            },
+        });
+    }
+
+    it("lets the quantity field advance in the product's increments from its minimum", () => {
+        const field = sold(6, 6, 6).find("#pdp-cfg-qty");
+
+        expect(field.attributes("min")).toBe("6");
+        expect(field.attributes("step")).toBe("6");
+        expect(field.element.value).toBe("6");
+    });
+
+    it("keeps whole units when the product has no increments", () => {
+        const field = build().find("#pdp-cfg-qty");
+
+        expect(field.attributes("min")).toBe("1");
+        expect(field.attributes("step")).toBe("1");
     });
 });
